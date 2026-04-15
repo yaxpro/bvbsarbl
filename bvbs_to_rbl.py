@@ -613,7 +613,7 @@ def convert(bvbs_path, output_rbl, template_rbl):
                     1,?,1,1,?,
                     ?,1,1,NULL,0,NULL,
                     ?,?,?,NULL,'0',
-                    0,0,0,0,0,'',NULL,0,0,0,
+                    1,0,0,0,0,'',NULL,0,0,0,
                     0,?,0,0,
                     ?,
                     ?,?,?,?,?,?,
