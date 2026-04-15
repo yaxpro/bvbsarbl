@@ -333,42 +333,22 @@ def calc_puntos_xy(segments):
 def build_puntos_for_figura(fig_id, segments):
     """
     Construye la lista de registros para insertar en PUNTOS.
-    
-    Formato del template:
-      Punto 1: LONGITUD=0, ANG_DOBLADO=angulo_primer_segmento (gancho inicial si existe)
-      Punto 2..N-1: LONGITUD=tramo_anterior, ANG_DOBLADO=angulo_siguiente_tramo
-      Punto N (ultimo): LONGITUD=ultimo_tramo, ANG_DOBLADO=0
-    
-    Cada registro tiene ID_ENTIDAD = fig_id (para barras simples).
+
+    Formato correcto del template (foto "buena"):
+      - El punto 1 es el ORIGEN: LONGITUD=0, ANG_DOBLADO=0 (marcador de inicio)
+      - Los puntos 2..N llevan LONGITUD=tramo_i y ANG_DOBLADO=angulo_al_final_de_ese_tramo
+      - El ultimo punto tiene ANG_DOBLADO=0
+
+    Esto hace que el primer segmento (gancho izquierdo) SI aparezca dibujado.
+    El angulo en cada punto indica el giro que ocurre al FINAL de ese tramo.
     """
     if not segments:
         return []
-    
+
     xy = calc_puntos_xy(segments)
     puntos = []
-    
-    # El numero de puntos es len(segments) + 1 (incluyendo punto inicial)
-    # Pero en el formato observado, el numero de puntos = len(segments) + 1
-    # donde el primer punto tiene longitud 0
-    
-    # Determinar el angulo inicial (del primer segmento si tiene @w != 0 antes del primer tramo)
-    # En BVBS: la estructura es @l<L1>@w<A1>@l<L2>@w<A2>...
-    # A1 es el angulo DESPUES del tramo L1
-    # Para estribos, los angulos de 90/135 indican la forma del gancho
-    
-    first_angle = segments[0]['angle'] if segments else 0.0
-    
-    # Punto inicial (siempre LONGITUD=0)
-    # ANG_DOBLADO del punto 1 segun template:
-    #   - Para barra recta (todos angulos=0): ANG=0
-    #   - Para estribo: ANG=90 (indica gancho inicial)
-    # Usamos el angulo del primer segmento como indicacion de gancho
-    initial_ang = 0.0
-    if len(segments) >= 2 and abs(first_angle) > 0.5:
-        # Hay angulo en el primer tramo - puede ser gancho inicial
-        # En el template se usa el angulo positivo para el gancho inicial
-        initial_ang = abs(first_angle)
-    
+
+    # Punto 1: origen fijo, longitud=0, angulo=0
     xy0 = xy[0] if xy else (0.1, 0.5)
     puntos.append({
         'id_entidad': fig_id,
@@ -377,35 +357,24 @@ def build_puntos_for_figura(fig_id, segments):
         'x': xy0[0],
         'y': xy0[1],
         'longitud': 0.0,
-        'ang_doblado': initial_ang,
+        'ang_doblado': 0.0,
         'tabulacion': 0,
     })
-    
-    # Puntos 2 a N
-    pt_idx = 2
+
+    # Puntos 2 a N: uno por cada segmento BVBS
     for seg_i, seg in enumerate(segments):
         L = seg['length']
-        
-        # El angulo de este punto es el angulo que hay AL FINAL de este tramo
-        # que en BVBS es seg['angle'] (el giro para el SIGUIENTE tramo)
-        # Segun template observado, los angulos van con signo negativo para giros horarios
-        ang = seg['angle']
-        
-        # Para ultimo punto (fin de barra), forzar angulo = 0
         is_last = (seg_i == len(segments) - 1)
-        if is_last:
-            ang = 0.0
-        
-        # Convertir al convenio del template:
-        # Los giros horarios (hacia abajo en dibujo) se representan negativos
-        # En BVBS los angulos son positivos para ambos sentidos
-        # Usamos el signo del BVBS directamente (ya viene con signo en algunos archivos)
-        
+
+        # El angulo en este punto es el giro que ocurre al final de este tramo.
+        # El ultimo tramo siempre termina con angulo=0 (fin de barra).
+        ang = 0.0 if is_last else seg['angle']
+
         xy_pt = xy[seg_i + 1] if (seg_i + 1) < len(xy) else (0.9, 0.5)
-        
+
         puntos.append({
             'id_entidad': fig_id,
-            'id_punto': pt_idx,
+            'id_punto': seg_i + 2,
             'id_figura': fig_id,
             'x': xy_pt[0],
             'y': xy_pt[1],
@@ -413,8 +382,7 @@ def build_puntos_for_figura(fig_id, segments):
             'ang_doblado': ang,
             'tabulacion': 0 if is_last else 1,
         })
-        pt_idx += 1
-    
+
     return puntos
 
 
@@ -573,27 +541,33 @@ def convert(bvbs_path, output_rbl, template_rbl):
         agrup_id = 1
         
         for fig_id, bar in enumerate(bars, 1):
-            pos      = to_safe(str(bar.get('position', fig_id)), 30)
+            # Posicion real de la barra segun BVBS (ej: 5, 8, 11, 15...)
+            pos_raw  = bar.get('position', str(fig_id))
+            pos      = to_safe(str(pos_raw), 30)
             ref      = to_safe(str(bar.get('reference', '')), 30)
             qty      = bar.get('quantity', 1)
+            # Longitud total: se toma directamente del BVBS (campo @l antes de @G)
+            # en mm. Es la longitud desplegada total incluyendo ganchos.
             total_len = bar.get('total_length', 0.0)
             diam     = bar.get('diameter', 12)
             steel    = get_steel_name(bar.get('steel_grade_code', '630'))
             mandrel  = get_mandrel(diam, bar.get('mandrel'))
             wpm      = calc_wpm(diam)
             segments = bar.get('segments', [])
-            
+
             # ID_MODELO segun forma de la barra
             id_modelo = get_id_modelo(segments)
-            
-            # Numero de doblados y dimension geometrica
+
+            # Numero de doblados y dimensiones geometricas (anchura/altura para dibujo)
             n_bends  = count_bends(segments)
-            long_total, long_central, altura, anchura, diagonal = calc_dimensions(segments)
-            
-            # Pesos
+            _geom_total, long_central, altura, anchura, diagonal = calc_dimensions(segments)
+            # LONGITUD en FIGURAS = longitud total real del BVBS (no recalculada)
+            long_total = round(total_len, 1)
+
+            # Pesos basados en longitud real del BVBS
             w_unit   = round(wpm * (total_len / 1000.0), 3)
             w_total  = round(w_unit * qty, 3)
-            
+
             # Agrupacion
             cod1 = build_agrupacion_primary(bar, fig_id)
             cod2 = build_agrupacion_hash(bar, f'b{fig_id}')
@@ -655,7 +629,9 @@ def convert(bvbs_path, output_rbl, template_rbl):
                 (
                     fig_id, now, now,
                     id_modelo,            # ID_MODELO - CLAVE!
-                    fig_id, pos, ref,
+                    # ORDEN_FIGURA usa la posicion real de la barra (no el indice secuencial)
+                    int(pos_raw) if str(pos_raw).isdigit() else fig_id,
+                    pos, ref,
                     n_bends,              # DOBLADOS
                     qty,
                     long_total, long_central, altura, anchura, diagonal, w_unit,
